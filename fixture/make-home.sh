@@ -29,13 +29,22 @@ insert into LSQuarantineEvent values
 
 # Chrome: two visits to one page and one download.
 sqlite3 "$AS/Google/Chrome/Default/History" "
-create table urls(id integer primary key, url, title, last_visit_time);
-create table visits(id, url, visit_time);
-create table downloads(id, start_time, target_path, tab_url);
-insert into urls values (1, 'https://example.com/a', 'A Zebrafixture page', 13350000000000000);
+create table urls(id integer primary key, url, title, visit_count default 0, last_visit_time);
+create table visits(id integer primary key, url, visit_time);
+create table downloads(id integer primary key, start_time, target_path, tab_url, tab_referrer_url);
+insert into urls (id, url, title, visit_count, last_visit_time) values (1, 'https://example.com/a', 'A Zebrafixture page', 2, 13350000000000000);
 insert into visits values (1, 1, 13300000000000000), (2, 1, 13350000000000000);
-insert into downloads values (1, 13340000000000000, '/Users/test/Downloads/f.zip', 'https://example.com/');"
+insert into downloads values (1, 13340000000000000, '/Users/test/Downloads/f.zip', 'https://example.com/', '');"
 head -c 3000 /dev/zero > "$L/Caches/Google/Chrome/blob"
+
+# Chrome site icons: one for example.com and one for another site.
+sqlite3 "$AS/Google/Chrome/Default/Favicons" "
+create table icon_mapping(id integer primary key, page_url, icon_id, page_url_type default 0);
+create table favicons(id integer primary key, url, icon_type);
+create table favicon_bitmaps(id integer primary key, icon_id, last_updated, image_data, width, height, last_requested);
+insert into favicons values (1, 'https://example.com/favicon.ico', 1), (2, 'https://other.org/favicon.ico', 1);
+insert into icon_mapping (page_url, icon_id) values ('https://example.com/a', 1), ('https://other.org/', 2);
+insert into favicon_bitmaps (icon_id, width, height) values (1, 16, 16), (2, 16, 16);"
 
 places_schema="
 create table moz_places(id integer primary key, url, title, last_visit_date);
