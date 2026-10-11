@@ -2,7 +2,7 @@
 #
 # mac-trace-audit.sh
 # Copyright (c) 2026 Itch Studio Ltd. MIT licence: https://github.com/Itch-Studio/trailsift-audit
-# This is the audit behind Trailsift for Mac (https://trailsift.com).
+# This is the audit behind TrailSift for Mac (https://trailsift.com).
 #
 # A read-only audit of where browsing, download and media traces live on a Mac.
 # Nothing is deleted, moved or modified. Databases are copied into a private
@@ -19,7 +19,7 @@
 #   ./mac-trace-audit.sh -deep    also find image and video files in caches and
 #                                 hidden folders (slow: several minutes)
 #   ./mac-trace-audit.sh -nolinks plain paths, without clickable terminal links
-#   ./mac-trace-audit.sh -json    one JSON object per line, for the Trailsift app
+#   ./mac-trace-audit.sh -json    one JSON object per line, for the TrailSift app
 #   ./mac-trace-audit.sh -search "word,another phrase"
 #                                 instead of the audit, search browser histories,
 #                                 the download log, file and folder names and
@@ -345,8 +345,10 @@ run_search() {
 
   section "Browsing history"
   about "Pages whose address or title contains a search word, newest first, with the date of the last visit. Up to 50 are listed per browser and word."
-  search_db "Safari" "$LIB/Safari/History.db" \
-    "select date(max(v.visit_time)+978307200,'unixepoch'), ifnull(max(v.title),''), i.url from history_items i join history_visits v on v.history_item = i.id where lower(i.url) like '%TERM%' or lower(ifnull(v.title,'')) like '%TERM%' group by i.id order by max(v.visit_time) desc limit 500;"
+  for sdb in "Safari:$LIB/Safari/History.db" "Safari Technology Preview:$LIB/SafariTechnologyPreview/History.db"; do
+    search_db "${sdb%%:*}" "${sdb#*:}" \
+      "select date(max(v.visit_time)+978307200,'unixepoch'), ifnull(max(v.title),''), i.url from history_items i join history_visits v on v.history_item = i.id where lower(i.url) like '%TERM%' or lower(ifnull(v.title,'')) like '%TERM%' group by i.id order by max(v.visit_time) desc limit 500;"
+  done
   for b in "Google/Chrome" "Google/Chrome Beta" "BraveSoftware/Brave-Browser" "Microsoft Edge" "Arc/User Data" "Vivaldi" "Chromium" "com.operasoftware.Opera"; do
     [ -d "$APPSUP/$b" ] || continue
     while IFS= read -r h; do
@@ -355,10 +357,17 @@ run_search() {
     done < <(find "$APPSUP/$b" -maxdepth 2 -name History -type f 2>/dev/null)
   done
   while IFS= read -r p; do
-    case "$p" in *TorBrowser-Data*) name="Tor Browser" ;; *) name="Firefox" ;; esac
+    case "$p" in
+      *TorBrowser-Data*) name="Tor Browser" ;;
+      */zen/*) name="Zen" ;;
+      */librewolf/*) name="LibreWolf" ;;
+      */Waterfox/*) name="Waterfox" ;;
+      *) name="Firefox" ;;
+    esac
     search_db "$name" "$p" \
       "select date(last_visit_date/1000000,'unixepoch'), ifnull(title,''), url from moz_places where lower(url) like '%TERM%' or lower(ifnull(title,'')) like '%TERM%' order by last_visit_date desc limit 500;"
-  done < <(find "$APPSUP/Firefox/Profiles" "$APPSUP/TorBrowser-Data/Browser" -maxdepth 3 -name places.sqlite 2>/dev/null)
+  done < <(find "$APPSUP/Firefox/Profiles" "$APPSUP/TorBrowser-Data/Browser" "$APPSUP/zen/Profiles" \
+             "$APPSUP/librewolf/Profiles" "$APPSUP/Waterfox/Profiles" -maxdepth 3 -name places.sqlite 2>/dev/null)
 
   section "Downloads"
   about "Downloads whose web address or page title contains a search word: the macOS download log, which survives clearing browser history, and each browser's own downloads list."
@@ -602,6 +611,169 @@ n=$(defaults read com.apple.dock persistent-apps 2>/dev/null | grep -ci torbrows
 row "Tor in the Dock" "$( [ "$n" -gt 0 ] && echo yes || echo no )"
 
 # ===========================================================================
+# Smaller browsers: a section for each one installed, so each shows on its own.
+found_other=0
+for f in "zen:Zen" "librewolf:LibreWolf" "Waterfox:Waterfox"; do
+  dir="$APPSUP/${f%%:*}/Profiles"
+  [ -d "$dir" ] || continue
+  found_other=1
+  section "${f#*:}"
+  about "${f#*:} is built on Firefox and keeps history, bookmarks and the downloads list in the same places.sqlite file, with site icons and your open tabs beside it. Press Shift-Command-Delete in ${f#*:} to clear them." \
+    "https://support.mozilla.org/kb/profiles-where-firefox-stores-user-data"
+  while IFS= read -r p; do
+    firefox_profile "${f#*:} ($(basename "$(dirname "$p")" | cut -d. -f2))" "$(dirname "$p")"
+  done < <(find "$dir" -maxdepth 2 -name places.sqlite 2>/dev/null)
+done
+STP="$LIB/SafariTechnologyPreview"
+if [ -d "$STP" ]; then
+  found_other=1
+  section "Safari Technology Preview"
+  about "Apple's preview of the next Safari keeps its own History.db, apart from Safari's, so clearing Safari's history leaves it as it was. Choose History > Clear History in Safari Technology Preview." \
+    "https://developer.apple.com/safari/technology-preview/"
+  STPDB=$(copy_db "$STP/History.db"); rc=$?
+  if [ $rc -eq 0 ]; then
+    row "History" "$(span "$(query "$STPDB" "select count(*), date(min(visit_time)+978307200,'unixepoch'), date(max(visit_time)+978307200,'unixepoch') from history_visits;")" visits)"
+    loc "$STP/History.db"
+    top_hosts "$STPDB" "select i.url from history_visits v join history_items i on i.id = v.history_item;"
+  elif [ $rc -ne 1 ] || ! ls "$STP" >/dev/null 2>&1; then
+    blocked "History"; loc "$STP" force
+  else
+    row "History" "not found"
+  fi
+fi
+if [ -d "$APPSUP/Orion" ]; then
+  found_other=1
+  section "Orion"
+  about "Kagi's Orion browser keeps history, site icons and caches in its own data folder. Clear them from Orion's History menu." "https://kagi.com/orion/"
+  path_stats "Orion data" "$APPSUP/Orion"
+fi
+for d in "$LIB/Containers/com.duckduckgo.macos.browser" "$APPSUP/com.duckduckgo.macos.browser"; do
+  [ -d "$d" ] || continue
+  if [ "$found_other" != duck ]; then
+    section "DuckDuckGo"
+    about "The DuckDuckGo browser keeps history, site icons and the sites you've fireproofed in its own data folder. Its Fire button clears them."
+  fi
+  found_other=duck
+  path_stats "DuckDuckGo data" "$d"
+done
+if [ "$found_other" = 0 ]; then
+  section "Other browsers"
+  about "Smaller browsers keep the same kinds of records as the big ones: Zen, LibreWolf and Waterfox, which are built on Firefox, Safari Technology Preview, Orion and DuckDuckGo. Each one installed here gets a section of its own." \
+    "https://support.mozilla.org/kb/profiles-where-firefox-stores-user-data"
+  row "Zen, LibreWolf, Waterfox, Orion, DuckDuckGo, Safari Technology Preview" "none installed"
+fi
+
+# ===========================================================================
+section "Browser extensions"
+about "Extensions run inside your browser. Many can read and change every page you visit, which means they see what you browse, and some keep their own history or send it to their maker. Extensions you no longer use are worth removing." \
+  "https://support.google.com/chrome_webstore/answer/2664769"
+# The name in a Chrome extension's manifest, looked up in its messages
+# file when the manifest only names a message.
+ext_name() {
+  local dir="$1" name key loc
+  name=$(plutil -extract name raw "$dir/manifest.json" 2>/dev/null)
+  case "$name" in
+    __MSG_*__)
+      key=${name#__MSG_}; key=${key%__}
+      loc=$(plutil -extract default_locale raw "$dir/manifest.json" 2>/dev/null)
+      for l in "$loc" en en_US en_GB; do
+        [ -f "$dir/_locales/$l/messages.json" ] || continue
+        # Message names aren't case-sensitive; files usually use lower case.
+        name=$(plutil -extract "$key.message" raw "$dir/_locales/$l/messages.json" 2>/dev/null \
+          || plutil -extract "$(printf '%s' "$key" | tr '[:upper:]' '[:lower:]').message" raw "$dir/_locales/$l/messages.json" 2>/dev/null)
+        [ -n "$name" ] && break
+      done ;;
+  esac
+  echo "${name:-$(basename "$(dirname "$dir")")}"
+}
+ALL_SITES='"(<all_urls>|\*://\*/\*|https?://\*/\*)"'
+# Extensions that can read every site first, then the rest, each by name.
+every_site_first() { local l; l=$(cat); { grep ' (every site)$' <<< "$l" | sort; grep -v ' (every site)$' <<< "$l" | sort; } | grep .; }
+found_ext=0
+for b in "Google/Chrome" "Google/Chrome Beta" "BraveSoftware/Brave-Browser" "Microsoft Edge" "Arc/User Data" "Vivaldi" "Chromium" "com.operasoftware.Opera"; do
+  [ -d "$APPSUP/$b" ] || continue
+  while IFS= read -r h; do
+    prof=$(dirname "$h")
+    [ -d "$prof/Extensions" ] || continue
+    found_ext=1
+    n=0; all=0; list=""
+    for e in "$prof/Extensions"/*/; do
+      v=$(ls -d "$e"*/ 2>/dev/null | tail -1)
+      [ -f "$v/manifest.json" ] || continue
+      # Chrome's own helpers have no page access and aren't listed.
+      grep -q '"update_url"' "$v/manifest.json" 2>/dev/null || [ -d "$v/_metadata" ] || continue
+      n=$((n + 1))
+      if grep -Eq "$ALL_SITES" "$v/manifest.json"; then all=$((all + 1)); list="$list$(ext_name "${v%/}") (every site)"$'\n'
+      else list="$list$(ext_name "${v%/}")"$'\n'; fi
+    done
+    label="$(browser_name "$b") ($(basename "$prof")) extensions"
+    if [ "$n" -gt 0 ]; then row "$label" "$n extensions, $all can read every site"; else row "$label" "0"; fi
+    loc "$prof/Extensions"
+    printf '%s' "$list" | every_site_first | while IFS= read -r x; do [ -n "$x" ] && item "" "$x"; done
+  done < <(find "$APPSUP/$b" -maxdepth 2 -name History -type f 2>/dev/null)
+done
+while IFS= read -r p; do
+  prof=$(dirname "$p")
+  found_ext=1
+  case "$prof" in */zen/*) name=Zen ;; */librewolf/*) name=LibreWolf ;; */Waterfox/*) name=Waterfox ;; *) name=Firefox ;; esac
+  total=$(plutil -extract addons raw "$p" 2>/dev/null || echo 0)
+  n=0; all=0; list=""
+  for ((i = 0; i < total; i++)); do
+    [ "$(plutil -extract "addons.$i.type" raw "$p" 2>/dev/null)" = extension ] || continue
+    [ "$(plutil -extract "addons.$i.location" raw "$p" 2>/dev/null)" = app-profile ] || continue
+    n=$((n + 1))
+    x=$(plutil -extract "addons.$i.defaultLocale.name" raw "$p" 2>/dev/null)
+    if plutil -extract "addons.$i.userPermissions.origins" json -o - "$p" 2>/dev/null | grep -Eq "$ALL_SITES"; then
+      all=$((all + 1)); list="$list$x (every site)"$'\n'
+    else list="$list$x"$'\n'; fi
+  done
+  row "$name ($(basename "$prof" | cut -d. -f2)) extensions" "$( [ "$n" -gt 0 ] && echo "$n extensions, $all can read every site" || echo 0)"
+  loc "$p"
+  printf '%s' "$list" | every_site_first | while IFS= read -r x; do [ -n "$x" ] && item "" "$x"; done
+done < <(find "$APPSUP/Firefox/Profiles" "$APPSUP/zen/Profiles" "$APPSUP/librewolf/Profiles" "$APPSUP/Waterfox/Profiles" -maxdepth 2 -name extensions.json 2>/dev/null)
+n=$(pluginkit -m -p com.apple.Safari.web-extension 2>/dev/null | grep -c .)
+row "Safari web extensions" "$n"
+[ $found_ext = 0 ] && [ "$n" = 0 ] && row "Chrome-family and Firefox extensions" "none installed"
+
+# ===========================================================================
+section "Cookies and site data"
+about "Cookies keep you signed in and remember settings, and tracking cookies follow you from site to site. Sites also store data in your browser: local storage, databases and offline copies. Clearing history leaves all of this in place, and it names every site that set it." \
+  "https://support.google.com/chrome/answer/95647"
+for b in "Google/Chrome" "Google/Chrome Beta" "BraveSoftware/Brave-Browser" "Microsoft Edge" "Arc/User Data" "Vivaldi" "Chromium" "com.operasoftware.Opera"; do
+  [ -d "$APPSUP/$b" ] || continue
+  while IFS= read -r h; do
+    prof=$(dirname "$h"); label="$(browser_name "$b") ($(basename "$prof"))"
+    ck="$prof/Cookies"; [ -f "$prof/Network/Cookies" ] && ck="$prof/Network/Cookies"
+    if [ -f "$ck" ]; then
+      db=$(copy_db "$ck")
+      if [ -n "$db" ]; then
+        IFS='|' read -r c s <<< "$(query "$db" "select count(*), count(distinct host_key) from cookies;")"
+        row "$label cookies" "${c:-0} cookies, ${s:-0} sites"
+        loc "$ck"
+      fi
+    fi
+    stores=()
+    for d in "Local Storage" "IndexedDB" "Service Worker" "Session Storage" "File System"; do [ -d "$prof/$d" ] && stores+=("$prof/$d"); done
+    if [ ${#stores[@]} -gt 0 ]; then
+      row "$label site storage" "$(du -sch "${stores[@]}" 2>/dev/null | tail -1 | cut -f1 | tr -d ' ')"
+      loc "$prof"
+    fi
+  done < <(find "$APPSUP/$b" -maxdepth 2 -name History -type f 2>/dev/null)
+done
+while IFS= read -r p; do
+  prof=$(dirname "$p")
+  case "$prof" in */zen/*) name=Zen ;; */librewolf/*) name=LibreWolf ;; */Waterfox/*) name=Waterfox ;; *TorBrowser*) continue ;; *) name=Firefox ;; esac
+  db=$(copy_db "$p")
+  [ -n "$db" ] || continue
+  IFS='|' read -r c s <<< "$(query "$db" "select count(*), count(distinct host) from moz_cookies;")"
+  row "$name ($(basename "$prof" | cut -d. -f2)) cookies" "${c:-0} cookies, ${s:-0} sites"
+  loc "$p"
+  [ -d "$prof/storage" ] && path_stats "$name ($(basename "$prof" | cut -d. -f2)) site storage" "$prof/storage"
+done < <(find "$APPSUP/Firefox/Profiles" "$APPSUP/zen/Profiles" "$APPSUP/librewolf/Profiles" "$APPSUP/Waterfox/Profiles" -maxdepth 2 -name cookies.sqlite 2>/dev/null)
+path_stats "Safari cookies" "$LIB/Containers/com.apple.Safari/Data/Library/Cookies/Cookies.binarycookies"
+path_stats "Safari site storage" "$LIB/Containers/com.apple.Safari/Data/Library/WebKit/WebsiteData"
+
+# ===========================================================================
 section "Thumbnails and previews"
 about "When Finder shows a file's icon preview, or you press Space to look at a file, macOS saves a small thumbnail in this hidden system cache. Thumbnails stay after the original file is deleted. Running qlmanage -r cache in Terminal resets it." \
   "https://eclecticlight.co/?s=QuickLook+thumbnail+cache"
@@ -635,6 +807,18 @@ about "This is macOS Resume: when an app quits, its open windows are saved so th
 ls "$LIB/Saved Application State" 2>/dev/null \
   | grep -Ei 'safari|chrome|firefox|torproject|brave|edge|arc|opera|vivaldi|vlc|iina|quicktime|preview|telegram|whatsapp' \
   | while IFS= read -r s; do item "" "${s%.savedState}" "$LIB/Saved Application State/$s"; done
+
+# ===========================================================================
+section "Keyboard and spelling"
+about "macOS learns from what you type. Words you teach the spell checker go in a list, and the keyboard keeps a model of the words and phrases you use for its suggestions and autocorrection, including words you've stopped it correcting. Together they can show names, places and terms you've typed." \
+  "https://support.apple.com/guide/mac-help/typing-suggestions-correct-mistakes-mac-mchlp2299/mac"
+if [ -f "$LIB/Spelling/LocalDictionary" ]; then
+  row "Learned spellings" "$(grep -c . "$LIB/Spelling/LocalDictionary") words"
+  loc "$LIB/Spelling/LocalDictionary"
+else
+  row "Learned spellings" "0"
+fi
+path_stats "Typing suggestions and autocorrection data" "$LIB/Keyboard"
 
 # ===========================================================================
 section "Media players"
@@ -673,6 +857,75 @@ path_stats "Signal attachments" "$APPSUP/Signal/attachments.noindex"
 path_stats "Discord cache" "$APPSUP/discord/Cache"
 
 # ===========================================================================
+section "Mail and documents"
+about "Opening an attachment in Mail saves a copy in Mail Downloads, which can stay after the message is deleted. Preview and TextEdit keep autosaved copies of documents you haven't saved yet. Word, Excel and PowerPoint remember every file they've opened, so they can reopen it from the File menu." \
+  "https://support.apple.com/guide/mail/view-save-or-delete-email-attachments-mlhlp1123/mac"
+path_stats "Mail Downloads" "$LIB/Containers/com.apple.mail/Data/Library/Mail Downloads"
+for a in Preview TextEdit; do
+  d="$LIB/Containers/com.apple.$a/Data/Library/Autosave Information"
+  [ -d "$d" ] && path_stats "$a autosaved documents" "$d"
+done
+for a in Word Excel PowerPoint; do
+  bm="$LIB/Containers/com.microsoft.$a/Data/Library/Preferences/com.microsoft.$a.securebookmarks.plist"
+  [ "$a" = PowerPoint ] && [ ! -f "$bm" ] && bm="$LIB/Containers/com.microsoft.Powerpoint/Data/Library/Preferences/com.microsoft.Powerpoint.securebookmarks.plist"
+  [ -f "$bm" ] || continue
+  row "$a: files it can reopen" "$(plutil -convert xml1 -o - "$bm" 2>/dev/null | grep -c '<key>file:') files"
+  loc "$bm"
+done
+about "Office's recent files are cleared in each app: Control-click a file under File > Open Recent and choose to clear the list, or remove files one at a time." \
+  "https://support.microsoft.com/en-gb/office/customize-the-list-of-recently-used-files-in-office-apps-b70b195a-eaba-4750-87d3-d9723820137e"
+
+# ===========================================================================
+section "Meeting and chat apps"
+about "Zoom saves meetings you record on this Mac in Documents/Zoom. Slack and Teams are built on a web browser, and their data folders hold a cache of the images, files and pages you've viewed in them, as well as sign-in data. Clearing the cache keeps your messages, which stay on the service." \
+  "https://learn.microsoft.com/en-us/troubleshoot/microsoftteams/teams-administration/clear-teams-cache"
+found_chat=0
+if [ -d "$APPSUP/zoom.us" ]; then found_chat=1; path_stats "Zoom data" "$APPSUP/zoom.us/data"; fi
+if [ -d "$HOME/Documents/Zoom" ]; then found_chat=1; path_stats "Zoom recordings" "$HOME/Documents/Zoom"; fi
+for d in "$LIB/Containers/com.tinyspeck.slackmacgap/Data/Library/Application Support/Slack" "$APPSUP/Slack"; do
+  [ -d "$d" ] || continue
+  found_chat=1; path_stats "Slack data" "$d"
+done
+d="$LIB/Containers/com.microsoft.teams2/Data/Library/Application Support/Microsoft/MSTeams"
+if [ -d "$d" ]; then found_chat=1; path_stats "Teams data" "$d"; fi
+if [ -d "$APPSUP/Microsoft/Teams" ]; then found_chat=1; path_stats "Teams (classic) data" "$APPSUP/Microsoft/Teams"; fi
+[ $found_chat = 0 ] && row "Zoom, Slack, Teams" "none installed"
+
+# ===========================================================================
+section "Shell history, clipboard and printing"
+about "The shell saves every command typed in Terminal, which can include file names, server addresses and, by mistake, passwords. Terminal also keeps a history per window so it can restore them. Clipboard managers keep everything you copy, and macOS keeps a record of each finished print job." \
+  "https://zsh.sourceforge.io/Doc/Release/Options.html"
+for h in .zsh_history .bash_history; do
+  [ -f "$HOME/$h" ] || continue
+  row "Shell history ($h)" "$(grep -c . "$HOME/$h" 2>/dev/null) commands, modified $(day "$(stat -f '%m' "$HOME/$h")")"
+  loc "$HOME/$h"
+done
+[ -d "$HOME/.zsh_sessions" ] && path_stats "Terminal window histories" "$HOME/.zsh_sessions"
+found_clip=0
+for c in "Maccy:$LIB/Containers/org.p0deje.Maccy/Data/Library/Application Support/Maccy" \
+         "Paste:$LIB/Containers/com.wiheads.paste/Data/Library/Application Support/Paste" \
+         "Pastebot:$LIB/Containers/com.tapbots.Pastebot2Mac/Data/Library/Application Support" \
+         "Alfred clipboard:$APPSUP/Alfred/Databases/clipboard.alfdb" \
+         "Raycast:$APPSUP/com.raycast.macos" \
+         "CopyClip:$LIB/Containers/com.fiplab.copyclip2/Data/Library/Application Support"; do
+  [ -e "${c#*:}" ] || continue
+  found_clip=1; path_stats "${c%%:*} history" "${c#*:}"
+done
+[ $found_clip = 0 ] && row "Clipboard managers" "none installed"
+about "Clear a clipboard manager's history from its own menu or settings." "https://github.com/p0deje/Maccy"
+jobs=$(lpstat -W completed -o 2>/dev/null | awk -v u="$(id -un)" '$2 == u')
+n=$(printf '%s' "$jobs" | grep -c .)
+if [ "$n" -gt 0 ]; then
+  newest=$(head -1 <<< "$jobs" | awk '{print $4, $5, $6, $7, $8}')
+  oldest=$(tail -1 <<< "$jobs" | awk '{print $4, $5, $6, $7, $8}')
+  row "Finished print jobs" "$n entries, $(date -j -f '%a %b %e %T %Y' "$oldest" '+%Y-%m-%d' 2>/dev/null) to $(date -j -f '%a %b %e %T %Y' "$newest" '+%Y-%m-%d' 2>/dev/null)"
+else
+  row "Finished print jobs" "0"
+fi
+about "macOS's printing system keeps a list of finished jobs, with the printer, size and time of each, and lpstat -W completed shows it. An administrator can clear it in Terminal with sudo cancel -a -x, which also cancels anything still waiting to print." \
+  "https://www.cups.org/doc/man-cancel.html"
+
+# ===========================================================================
 section "Trash and Downloads"
 about "Files in the Trash still exist until it's emptied. Downloads holds everything browsers and apps saved, and is often never cleared."
 path_stats "Trash" "$HOME/.Trash"
@@ -697,6 +950,42 @@ about "knowledgeC.db is the older activity database: which app was in front and 
 path_stats "Biome streams" "$LIB/Biome"
 about "Biome is Apple's newer system for the same job and has been taking over from knowledgeC. It stores activity as many small stream files, one stream per kind of event, such as app use, media and notifications. In macOS 26 Tahoe a new stream records the name of every menu command you choose. Some streams sync to your other devices through iCloud." \
   "https://unit42.paloaltonetworks.com/new-macos-artifact-discovered/"
+
+# ===========================================================================
+section "iPhone and iPad backups"
+about "When an iPhone or iPad is backed up to this Mac in Finder, the whole device is copied here: messages, photos, call history, Safari history and app data, unless the backup is encrypted. Backups of old devices stay until they're deleted, and they're often the largest forgotten files on a Mac." \
+  "https://support.apple.com/en-us/108809"
+MS="$APPSUP/MobileSync/Backup"
+if [ ! -d "$MS" ]; then
+  row "Device backups" "not found"
+elif ! ls "$MS" >/dev/null 2>&1; then
+  blocked "Device backups"; loc "$MS"
+else
+  n=0
+  for d in "$MS"/*/; do
+    [ -f "$d/Info.plist" ] || continue
+    n=$((n + 1))
+    dev=$(plutil -extract "Device Name" raw "$d/Info.plist" 2>/dev/null || echo "Device")
+    when=$(plutil -extract "Last Backup Date" raw "$d/Info.plist" 2>/dev/null | cut -c1-10)
+    enc=$(plutil -extract IsEncrypted raw "$d/Manifest.plist" 2>/dev/null)
+    row "Backup of $dev" "$(du -sh "$d" 2>/dev/null | cut -f1 | tr -d ' '), last backed up ${when:-unknown}$( [ "$enc" = true ] && echo ', encrypted' || echo ', not encrypted')"
+    loc "${d%/}"
+  done
+  [ "$n" = 0 ] && row "Device backups" "0"
+fi
+
+# ===========================================================================
+section "Remembered Wi-Fi networks"
+about "Your Mac remembers every Wi-Fi network it has joined so it can join again. The list of names is a record of where the Mac has been: homes, offices, hotels, cafés and airports. It syncs to your other devices through iCloud Keychain." \
+  "https://support.apple.com/guide/mac-help/reset-or-remove-wi-fi-network-settings-on-mac-mchl6129bcb2/mac"
+WIFI=$(networksetup -listallhardwareports 2>/dev/null | awk '/Wi-Fi|AirPort/ { getline; print $2; exit }')
+if [ -z "$WIFI" ]; then
+  row "Wi-Fi" "not found"
+else
+  nets=$(networksetup -listpreferredwirelessnetworks "$WIFI" 2>/dev/null | tail -n +2 | sed 's/^[[:space:]]*//')
+  row "Remembered networks" "$(printf '%s' "$nets" | grep -c .)"
+  if [ "$VERBOSE" = 1 ]; then printf '%s\n' "$nets" | while IFS= read -r x; do [ -n "$x" ] && item "" "$x"; done; fi
+fi
 
 # ===========================================================================
 section "Copies elsewhere"

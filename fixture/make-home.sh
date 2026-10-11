@@ -65,6 +65,69 @@ insert into moz_bookmarks values (1, 1, 5);"
 echo 'user_pref("browser.download.lastDir", "/Users/test/Downloads");' > "$P/prefs.js"
 printf 'LastWritten 2026-09-30 21:14:02\n' > "$AS/TorBrowser-Data/Tor/state"
 
+# Zen, a Firefox-based browser: one visit, with the search word in its title.
+mkdir -p "$AS/zen/Profiles/z.Default (release)"
+sqlite3 "$AS/zen/Profiles/z.Default (release)/places.sqlite" "$places_schema
+insert into moz_places values (1, 'https://zen.example/', 'Zebrafixture in Zen', 1710000000000000);
+insert into moz_historyvisits values (1, 1, 1710000000000000);"
+
+# Mail and documents: an opened attachment, an autosaved TextEdit document,
+# and two files Word can reopen.
+C="$L/Containers"
+mkdir -p "$C/com.apple.mail/Data/Library/Mail Downloads/AB12" "$C/com.apple.TextEdit/Data/Library/Autosave Information" \
+  "$C/com.microsoft.Word/Data/Library/Preferences"
+printf 'x' > "$C/com.apple.mail/Data/Library/Mail Downloads/AB12/invoice.pdf"
+printf 'x' > "$C/com.apple.TextEdit/Data/Library/Autosave Information/Unsaved Document.rtf"
+cat > "$C/com.microsoft.Word/Data/Library/Preferences/com.microsoft.Word.securebookmarks.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>file:///Users/test/Documents/a.docx</key><dict/>
+<key>file:///Users/test/Documents/b.docx</key><dict/>
+</dict></plist>
+PLIST
+
+# Slack's data folder, and a shell history of three commands.
+mkdir -p "$C/com.tinyspeck.slackmacgap/Data/Library/Application Support/Slack/Cache"
+head -c 2000 /dev/zero > "$C/com.tinyspeck.slackmacgap/Data/Library/Application Support/Slack/Cache/blob"
+printf 'ls\ncd Documents\nssh server.example\n' > "$H/.zsh_history"
+
+# A Chrome extension that can read every site, and a Firefox one that can't.
+X="$AS/Google/Chrome/Default/Extensions/abcdefghijklmnopabcdefghijklmnop/1.0_0"
+mkdir -p "$X/_locales/en"
+printf '{"name": "__MSG_APP_NAME__", "default_locale": "en", "update_url": "https://clients2.google.com/service/update2/crx", "host_permissions": ["<all_urls>"]}' > "$X/manifest.json"
+printf '{"app_name": {"message": "Page Reader"}}' > "$X/_locales/en/messages.json"
+printf '{"addons": [{"type": "extension", "location": "app-profile", "defaultLocale": {"name": "Tab Counter"}, "userPermissions": {"origins": []}}, {"type": "extension", "location": "app-system-defaults", "defaultLocale": {"name": "Built In"}}]}' \
+  > "$AS/Firefox/Profiles/x.default-release/extensions.json"
+
+# Cookies: three in Chrome from two sites, one in Firefox.
+sqlite3 "$AS/Google/Chrome/Default/Cookies" "
+create table cookies(host_key, name, value, path);
+insert into cookies values ('.example.com', 'a', '1', '/'), ('shop.example.com', 'b', '2', '/'), ('.other.org', 'c', '3', '/');"
+mkdir -p "$AS/Google/Chrome/Default/Local Storage/leveldb"
+head -c 3000 /dev/zero > "$AS/Google/Chrome/Default/Local Storage/leveldb/000003.log"
+sqlite3 "$AS/Firefox/Profiles/x.default-release/cookies.sqlite" "
+create table moz_cookies(id integer primary key, host, name, value);
+insert into moz_cookies (host, name, value) values ('.example.com', 'a', '1');"
+
+# Two learned spellings and the keyboard's learned data.
+mkdir -p "$L/Spelling" "$L/Keyboard"
+printf 'zebrafixtures\nTrailSift\n' > "$L/Spelling/LocalDictionary"
+head -c 2000 /dev/zero > "$L/Keyboard/AutocorrectionRejections.db"
+
+# A backup of an old iPhone.
+B="$AS/MobileSync/Backup/00008030-0011223344556677"
+mkdir -p "$B/ab"
+cat > "$B/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Device Name</key><string>Old iPhone</string>
+<key>Last Backup Date</key><date>2023-05-01T10:00:00Z</date>
+</dict></plist>
+PLIST
+head -c 5000 /dev/zero > "$B/ab/abcdef0123"
+
 # A file named with the search word, and one inside an app cache, which the
 # name search skips.
 printf 'x' > "$H/Documents/zebrafixture notes.txt"
