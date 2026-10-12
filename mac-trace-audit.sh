@@ -59,6 +59,8 @@ trap 'rm -rf "$TMP"' EXIT
 
 NEED_FDA=0
 LIB="$HOME/Library"
+# The tests point this at a stand-in for /Library.
+SYSLIB="${TRAILSIFT_SYSTEM_LIBRARY:-/Library}"
 APPSUP="$LIB/Application Support"
 
 B=""; D=""; Y=""; R=""; LINKS=0
@@ -206,6 +208,8 @@ browser_name() {
 
 # "1 match", "2 matches", "500 or more matches".
 matches() { if [ "$1" = 1 ]; then echo "1 match"; else echo "$1 matches"; fi; }
+# plural N WORD [PLURAL]: "1 folder", "3 folders".
+plural() { if [ "$1" = 1 ]; then echo "1 $2"; else echo "$1 ${3:-${2}s}"; fi; }
 
 # Print "N items, first to last" from a "count|first|last" query result.
 span() {
@@ -264,6 +268,10 @@ chromium_profile() {
   row "$label downloads list" "$(span "$(query "$db" "select count(*), date(min(start_time)/1000000-11644473600,'unixepoch'), date(max(start_time)/1000000-11644473600,'unixepoch') from downloads;")" entries)"
   [ -f "$dir/Favicons" ] && path_stats "$label favicons" "$dir/Favicons"
   [ -d "$dir/Sessions" ] && path_stats "$label saved sessions" "$dir/Sessions"
+  if [ -f "$dir/TransportSecurity" ]; then
+    row "$label secure-site list" "$(grep -o '"host":' "$dir/TransportSecurity" 2>/dev/null | grep -c .) sites"
+    loc "$dir/TransportSecurity"
+  fi
 }
 
 # Firefox and Tor Browser share this format.
@@ -279,6 +287,10 @@ firefox_profile() {
   [ -f "$dir/favicons.sqlite" ] && path_stats "$label favicons" "$dir/favicons.sqlite"
   if [ -f "$dir/sessionstore.jsonlz4" ] || [ -d "$dir/sessionstore-backups" ]; then
     path_stats "$label saved session" "$dir/sessionstore-backups"
+  fi
+  if [ -f "$dir/SiteSecurityServiceState.txt" ]; then
+    row "$label secure-site list" "$(grep -c . "$dir/SiteSecurityServiceState.txt") sites"
+    loc "$dir/SiteSecurityServiceState.txt"
   fi
 }
 
@@ -379,6 +391,15 @@ run_search() {
       search_db "$(browser_name "$b") downloads ($(basename "$(dirname "$h")"))" "$h" \
         "select date(start_time/1000000-11644473600,'unixepoch'), '', ifnull(target_path,'') || ' from ' || ifnull(tab_url,'') from downloads where lower(ifnull(target_path,'')) like '%TERM%' or lower(ifnull(tab_url,'')) like '%TERM%' order by start_time desc limit 500;"
     done < <(find "$APPSUP/$b" -maxdepth 2 -name History -type f 2>/dev/null)
+  done
+
+  for t in "${TERMS[@]}"; do
+    local from n
+    from=$(mdfind -onlyin "$HOME" "kMDItemWhereFroms == \"*$t*\"cd" 2>/dev/null | grep -v '\.photoslibrary/')
+    n=$(printf '%s' "$from" | grep -c .)
+    if [ "$n" -eq 0 ]; then row "Files downloaded from \"$t\"" "no matches" missing; continue; fi
+    row "Files downloaded from \"$t\"" "$(matches "$n")" found
+    head -100 <<< "$from" | while IFS= read -r f; do item "" "$(tilde "$f")" "$f"; done
   done
 
   section "File and folder names"
@@ -487,6 +508,18 @@ else
       done
   top_hosts "$QDB" "select ifnull(LSQuarantineOriginURLString, LSQuarantineDataURLString) from LSQuarantineEvent where ifnull(LSQuarantineOriginURLString, LSQuarantineDataURLString) is not null;"
 fi
+# Downloaded files carry the address they came from on the file itself. Spotlight
+# knows most of them; Downloads, Desktop and Documents are also looked through
+# directly, for files it hasn't indexed.
+WHEREFROM=$( { mdfind -onlyin "$HOME" 'kMDItemWhereFroms == "*"' 2>/dev/null
+  for d in "$HOME/Downloads" "$HOME/Desktop" "$HOME/Documents"; do
+    [ -d "$d" ] && find "$d" -xattrname com.apple.metadata:kMDItemWhereFroms 2>/dev/null
+  done; } | grep -v '\.photoslibrary/' | sort -u)
+n=$(printf '%s' "$WHEREFROM" | grep -c .)
+row "Files that remember where they came from" "$n files"
+[ "$n" -gt 0 ] && loc "$HOME/Downloads"
+about "Every downloaded file keeps the address it came from on the file itself, which Get Info shows as Where from. Clearing browser history and the download log leaves it in place, so a file in Downloads can still say which site it came from." \
+  "https://eclecticlight.co/?s=kMDItemWhereFroms"
 
 # ===========================================================================
 section "Safari"
@@ -512,6 +545,16 @@ else
 fi
 path_stats "Cache" "$LIB/Containers/com.apple.Safari/Data/Library/Caches"
 [ -d "$LIB/Caches/com.apple.Safari" ] && path_stats "Cache (legacy)" "$LIB/Caches/com.apple.Safari"
+# macOS keeps one list of secure sites for Safari and other apps that load web pages.
+HSTS="$LIB/Cookies/HSTS.plist"
+if [ -r "$HSTS" ]; then
+  row "Secure-site list (HSTS)" "$(plutil -extract com.apple.CFNetwork.defaultStorageSession raw "$HSTS" 2>/dev/null || echo 0) sites"
+  loc "$HSTS"
+else
+  path_stats "Secure-site list (HSTS)" "$HSTS"
+fi
+about "Browsers remember every site they've used over a secure connection, to insist on it next time. The list is kept apart from history, and clearing history leaves it in place." \
+  "https://developer.mozilla.org/docs/Web/HTTP/Reference/Headers/Strict-Transport-Security"
 
 # ===========================================================================
 section "Chrome-family browsers"
@@ -809,6 +852,58 @@ ls "$LIB/Saved Application State" 2>/dev/null \
   | while IFS= read -r s; do item "" "${s%.savedState}" "$LIB/Saved Application State/$s"; done
 
 # ===========================================================================
+section "Code editors and IDEs"
+about "Code editors keep their own lists of the folders and files you've opened, apart from macOS's Recent Items, and clearing those leaves these in place. VS Code and editors built on it also keep the history of their built-in terminal, every command typed there, and a folder of saved state for each project ever opened, which stays after the project is deleted." \
+  "https://code.visualstudio.com/docs/editor/command-line#_opening-vs-code-with-urls"
+found_ed=0
+for e in "Code:VS Code" "Code - Insiders:VS Code Insiders" "Cursor:Cursor" "VSCodium:VSCodium" "Windsurf:Windsurf"; do
+  dir="$APPSUP/${e%%:*}/User"; name="${e#*:}"
+  [ -d "$dir" ] || continue
+  found_ed=1
+  st="$dir/globalStorage/state.vscdb"
+  if [ -f "$st" ]; then
+    db=$(copy_db "$st")
+    if [ -n "$db" ]; then
+      n=$(query "$db" "select ifnull(sum(json_array_length(value, '\$.entries')), 0) from ItemTable where key = 'history.recentlyOpenedPathsList';")
+      row "$name: recently opened" "$(plural "${n:-0}" "folder or file" "folders and files")"; loc "$st"
+      c=$(query "$db" "select ifnull(sum(json_array_length(value, '\$.entries')), 0) from ItemTable where key = 'terminal.history.entries.commands';")
+      f=$(query "$db" "select ifnull(sum(json_array_length(value, '\$.entries')), 0) from ItemTable where key = 'terminal.history.entries.dirs';")
+      if [ "${c:-0}" -gt 0 ] || [ "${f:-0}" -gt 0 ]; then row "$name: terminal history" "$(plural "${c:-0}" command), $(plural "${f:-0}" folder)" found; loc "$st"
+      else row "$name: terminal history" "0"; fi
+    fi
+  fi
+  ws="$dir/workspaceStorage"
+  if [ -d "$ws" ]; then
+    total=0; gone=0
+    for w in "$ws"/*/workspace.json; do
+      [ -f "$w" ] || continue
+      total=$((total + 1))
+      u=$(sed -n 's/.*"folder": *"file:\/\/\([^"]*\)".*/\1/p' "$w" | head -1)
+      [ -n "$u" ] || continue
+      u=$(printf '%b' "${u//%/\\x}")
+      case "$u" in /Volumes/*) continue ;; esac
+      [ -e "$u" ] || gone=$((gone + 1))
+    done
+    if [ "$total" -gt 0 ]; then row "$name: projects it keeps state for" "$(plural "$total" folder), $gone no longer $([ "$gone" = 1 ] && echo exists || echo exist)"; loc "$ws"
+    else row "$name: projects it keeps state for" "0"; fi
+  fi
+done
+for d in "$APPSUP"/JetBrains/* "$APPSUP"/Google/AndroidStudio*; do
+  f="$d/options/recentProjects.xml"
+  [ -f "$f" ] || continue
+  found_ed=1
+  name=$(basename "$d" | sed -E 's/^AndroidStudio/Android Studio/; s/([A-Za-z])([0-9])/\1 \2/')
+  row "$name: recent projects" "$(plural "$(grep -c '<RecentProjectMetaInfo' "$f")" project)"; loc "$f"
+done
+for d in "$APPSUP/Sublime Text" "$APPSUP/Sublime Text 3"; do
+  f="$d/Local/Session.sublime_session"
+  [ -f "$f" ] || continue
+  found_ed=1
+  row "Sublime Text: session and recent files" "modified $(day "$(stat -f '%m' "$f")")"; loc "$f"
+done
+[ $found_ed = 0 ] && row "VS Code, Cursor, JetBrains, Sublime Text" "none installed"
+
+# ===========================================================================
 section "Keyboard and spelling"
 about "macOS learns from what you type. Words you teach the spell checker go in a list, and the keyboard keeps a model of the words and phrases you use for its suggestions and autocorrection, including words you've stopped it correcting. Together they can show names, places and terms you've typed." \
   "https://support.apple.com/guide/mac-help/typing-suggestions-correct-mistakes-mac-mchlp2299/mac"
@@ -857,6 +952,24 @@ path_stats "Signal attachments" "$APPSUP/Signal/attachments.noindex"
 path_stats "Discord cache" "$APPSUP/discord/Cache"
 
 # ===========================================================================
+section "Location in photos"
+about "A photo taken on a phone records where it was taken, often to within a few metres, and the location goes with the file when it's emailed, sent by AirDrop or uploaded to a site that keeps it. Home, school and work show up in photos people share without a second thought. Counted here from Spotlight, for photos outside the Photos library." \
+  "https://support.apple.com/guide/photos/view-photos-by-location-phtfbb7a1b7a/mac"
+total=0
+for d in Downloads Desktop Documents Pictures; do
+  [ -d "$HOME/$d" ] || continue
+  n=$(mdfind -onlyin "$HOME/$d" 'kMDItemLatitude == * && kMDItemContentTypeTree == "public.image"' 2>/dev/null | grep -v '\.photoslibrary/' | grep -c .)
+  total=$((total + n))
+  eval "loc_$d=$n"
+done
+row "Photos that record where they were taken" "$(plural "$total" photo)"
+for d in Downloads Desktop Documents Pictures; do
+  eval "n=\${loc_$d:-0}"
+  [ "$n" -gt 0 ] && item "$n" "$d" "$HOME/$d"
+done
+about "TrailSift's Photo Locations page lists them with where each was taken, and makes copies without the location for sharing. The originals stay as they are. To share from Photos without it, click Options in the Share or Export window and turn off Location."
+
+# ===========================================================================
 section "Mail and documents"
 about "Opening an attachment in Mail saves a copy in Mail Downloads, which can stay after the message is deleted. Preview and TextEdit keep autosaved copies of documents you haven't saved yet. Word, Excel and PowerPoint remember every file they've opened, so they can reopen it from the File menu." \
   "https://support.apple.com/guide/mail/view-save-or-delete-email-attachments-mlhlp1123/mac"
@@ -872,6 +985,28 @@ for a in Word Excel PowerPoint; do
   row "$a: files it can reopen" "$(plutil -convert xml1 -o - "$bm" 2>/dev/null | grep -c '<key>file:') files"
   loc "$bm"
 done
+# Everyone you've emailed or messaged, kept by macOS to suggest them again,
+# including people who aren't in Contacts. The store is private to macOS, so
+# its rows are counted from whichever table names them.
+REC="$LIB/Containers/com.apple.corerecents.recentsd/Data/Library/Recents"
+if [ -d "$REC" ] && ls "$REC" >/dev/null 2>&1; then
+  n=""
+  for f in "$REC"/*; do
+    case "$f" in *-wal|*-shm) continue ;; esac
+    [ "$(head -c 15 "$f" 2>/dev/null)" = "SQLite format 3" ] || continue
+    db=$(copy_db "$f") || continue
+    if [ -n "$(query "$db" "select 1 from sqlite_master where type = 'table' and name = 'contacts';")" ]; then
+      n=$(query "$db" "select count(distinct lower(address)) from contacts where ifnull(address, '') <> '';")
+    else
+      t=$(query "$db" "select name from sqlite_master where type = 'table' and name like '%recent%' order by length(name) limit 1;")
+      [ -n "$t" ] && n=$(query "$db" "select count(*) from \"$t\";")
+    fi
+  done
+  if [ -n "$n" ]; then row "Remembered addresses (Mail and Messages)" "$n addresses"; loc "$REC"
+  else path_stats "Remembered addresses (Mail and Messages)" "$REC"; fi
+else
+  path_stats "Remembered addresses (Mail and Messages)" "$REC"
+fi
 about "Office's recent files are cleared in each app: Control-click a file under File > Open Recent and choose to clear the list, or remove files one at a time." \
   "https://support.microsoft.com/en-gb/office/customize-the-list-of-recently-used-files-in-office-apps-b70b195a-eaba-4750-87d3-d9723820137e"
 
@@ -950,6 +1085,61 @@ about "knowledgeC.db is the older activity database: which app was in front and 
 path_stats "Biome streams" "$LIB/Biome"
 about "Biome is Apple's newer system for the same job and has been taking over from knowledgeC. It stores activity as many small stream files, one stream per kind of event, such as app use, media and notifications. In macOS 26 Tahoe a new stream records the name of every menu command you choose. Some streams sync to your other devices through iCloud." \
   "https://unit42.paloaltonetworks.com/new-macos-artifact-discovered/"
+
+# ===========================================================================
+section "Notification history"
+about "macOS keeps the notifications apps have shown, with their text, in a database of its own: a message preview, a code sent by text, a calendar invitation. Notifications you've dismissed can stay there for days, and other clean-up tools leave it alone. It's protected, so reading it needs Full Disk Access." \
+  "https://support.apple.com/guide/mac-help/change-notifications-settings-mh40583/mac"
+NDB_SRC="$LIB/Group Containers/group.com.apple.usernoted/db2/db"
+[ -e "$NDB_SRC" ] || [ ! -e "$(getconf DARWIN_USER_DIR 2>/dev/null)com.apple.notificationcenter/db2/db" ] || NDB_SRC="$(getconf DARWIN_USER_DIR)com.apple.notificationcenter/db2/db"
+NDB=""
+[ -f "$NDB_SRC" ] && NDB=$(copy_db "$NDB_SRC" 2>/dev/null)
+if [ -n "$NDB" ] && [ -n "$(query "$NDB" "select 1 from sqlite_master where name = 'record';")" ]; then
+  n=$(query "$NDB" "select count(*) from record;")
+  apps=$(query "$NDB" "select count(distinct app_id) from record;")
+  if [ "${n:-0}" -gt 0 ]; then
+    range=$(query "$NDB" "select date(min(delivered_date) + 978307200, 'unixepoch'), date(max(delivered_date) + 978307200, 'unixepoch') from record where delivered_date > 0;")
+    row "Notifications kept" "$(plural "$n" notification) from $(plural "$apps" app)${range:+, ${range%%|*} to ${range#*|}}"
+    loc "$NDB_SRC"
+    query "$NDB" "select a.identifier, count(*) from record r join app a on a.app_id = r.app_id group by a.identifier order by 2 desc limit 8;" \
+      | while IFS='|' read -r id count; do item "$count" "$id"; done
+  else
+    row "Notifications kept" "0"
+  fi
+elif [ -n "$NDB" ]; then
+  path_stats "Notifications kept" "$NDB_SRC"
+elif [ -e "$NDB_SRC" ] || { [ -e "$LIB/Group Containers/group.com.apple.usernoted" ] && ! ls "$LIB/Group Containers/group.com.apple.usernoted" >/dev/null 2>&1; }; then
+  blocked "Notifications kept"; loc "$NDB_SRC" force
+else
+  row "Notifications kept" "not found"
+fi
+about "To keep message text out of it, set Show previews to When Unlocked or Never in System Settings > Notifications, and turn off Show in Notification Centre for apps whose notifications you'd rather weren't kept. Clearing notifications in Notification Centre removes them."
+
+# ===========================================================================
+section "Startup items left by removed apps"
+about "Apps that start helpers at login or in the background install launch agents and daemons. Removing an app by dragging it to the Trash usually leaves them, and macOS tries to start their missing programs at every login. The ones in /Library work for every account and need an administrator to remove." \
+  "https://support.apple.com/guide/terminal/script-management-with-launchd-apdc6c1077b-5d5d-4d35-9c19-60f2397b2369/mac"
+# The program a launch item runs, if it names one by full path.
+launch_program() {
+  local p
+  p=$(plutil -extract Program raw "$1" 2>/dev/null || plutil -extract ProgramArguments.0 raw "$1" 2>/dev/null)
+  case "$p" in /*) echo "$p" ;; esac
+}
+for scope in "Your launch agents:$LIB/LaunchAgents" "Launch agents for every account:$SYSLIB/LaunchAgents" "Launch daemons:$SYSLIB/LaunchDaemons"; do
+  dir="${scope#*:}"; label="${scope%%:*}"
+  stale=""
+  for f in "$dir"/*.plist; do
+    [ -f "$f" ] || continue
+    prog=$(launch_program "$f")
+    [ -n "$prog" ] && [ ! -e "$prog" ] && stale="$stale$f"$'\n'
+  done
+  n=$(printf '%s' "$stale" | grep -c .)
+  row "$label whose app is gone" "$n"
+  if [ "$n" -gt 0 ]; then
+    loc "$dir"
+    printf '%s' "$stale" | while IFS= read -r f; do [ -n "$f" ] && item "" "$(basename "$f" .plist)" "$f"; done
+  fi
+done
 
 # ===========================================================================
 section "iPhone and iPad backups"

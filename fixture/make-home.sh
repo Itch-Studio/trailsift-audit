@@ -87,6 +87,19 @@ cat > "$C/com.microsoft.Word/Data/Library/Preferences/com.microsoft.Word.secureb
 </dict></plist>
 PLIST
 
+# Three remembered addresses, in a store like macOS's.
+mkdir -p "$C/com.apple.corerecents.recentsd/Data/Library/Recents"
+sqlite3 "$C/com.apple.corerecents.recentsd/Data/Library/Recents/Recents" "
+create table recents(ROWID integer primary key autoincrement, display_name text, bundle_identifier text, sending_address text,
+  original_source text, dates text not null, last_date integer, weight float, record_hash text not null, count integer, group_kind integer);
+create table contacts(ROWID integer primary key autoincrement, recent_id integer, display_name text, kind text, address text);
+create table metadata(ROWID integer primary key autoincrement, recent_id integer, key text, value, unique (recent_id, key));
+insert into recents (display_name, bundle_identifier, dates, last_date, record_hash) values
+  ('Alex', 'com.apple.mail', '', 1760000000, 'a'), ('Sam', 'com.apple.mail', '', 1700000000, 'b'), ('', 'com.apple.MobileSMS', '', 1750000000, 'c');
+insert into contacts (recent_id, display_name, kind, address) values
+  (1, 'Alex', 'email', 'alex@example.com'), (2, 'Sam', 'email', 'sam@example.com'), (3, '', 'phone', '+441234567890');
+insert into metadata (recent_id, key, value) values (1, 'k', 'v'), (2, 'k', 'v');"
+
 # Slack's data folder, and a shell history of three commands.
 mkdir -p "$C/com.tinyspeck.slackmacgap/Data/Library/Application Support/Slack/Cache"
 head -c 2000 /dev/zero > "$C/com.tinyspeck.slackmacgap/Data/Library/Application Support/Slack/Cache/blob"
@@ -138,6 +151,69 @@ printf 'x' > "$AS/SomeApp/Cache/zebrafixture.bin"
 printf 'x' > "$H/Downloads/photo.jpg"
 printf 'x' > "$H/Downloads/TorBrowser-14.dmg"
 
+# The downloaded photo remembers where it came from, as macOS records it.
+cat > "$H/.wherefrom.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><array><string>https://cdn.example.com/photo.jpg</string><string>https://example.com/gallery</string></array></plist>
+PLIST
+plutil -convert binary1 "$H/.wherefrom.plist"
+xattr -wx com.apple.metadata:kMDItemWhereFroms "$(xxd -p "$H/.wherefrom.plist" | tr -d '\n')" "$H/Downloads/photo.jpg"
+rm "$H/.wherefrom.plist"
+
+# Secure-site lists: Chrome's, with example.com and another site hashed, and Firefox's.
+/usr/bin/python3 - "$AS/Google/Chrome/Default/TransportSecurity" <<'PY'
+import base64, hashlib, json, sys
+def h(name):
+    wire = b"".join(bytes([len(l)]) + l.encode() for l in name.split(".")) + b"\x00"
+    return base64.b64encode(hashlib.sha256(wire).digest()).decode()
+json.dump({"version": 2, "sts": [{"host": h(n), "mode": "force-https", "expiry": 2e9} for n in ("example.com", "www.example.com", "other.org")]}, open(sys.argv[1], "w"))
+PY
+printf 'example.com:HSTS\t0\t20000\t2000000000000,1,0\nother.org:HSTS\t0\t20000\t2000000000000,1,0\n' > "$AS/Firefox/Profiles/x.default-release/SiteSecurityServiceState.txt"
+
+# Launch agents: one left by a removed app, one whose program is there.
+mkdir -p "$L/LaunchAgents" "$H/SystemLibrary/LaunchAgents" "$H/SystemLibrary/LaunchDaemons"
+for f in "com.gone.reader.helper:/Applications/Gone Reader.app/Contents/MacOS/Helper" "com.present.tool:/bin/ls"; do
+  plutil -create xml1 "$L/LaunchAgents/${f%%:*}.plist"
+  plutil -insert Label -string "${f%%:*}" "$L/LaunchAgents/${f%%:*}.plist"
+  plutil -insert ProgramArguments -array "$L/LaunchAgents/${f%%:*}.plist"
+  plutil -insert ProgramArguments.0 -string "${f#*:}" "$L/LaunchAgents/${f%%:*}.plist"
+done
+plutil -create xml1 "$H/SystemLibrary/LaunchDaemons/com.gone.reader.daemon.plist"
+plutil -insert Label -string com.gone.reader.daemon "$H/SystemLibrary/LaunchDaemons/com.gone.reader.daemon.plist"
+plutil -insert Program -string "/Library/Application Support/Gone Reader/daemon" "$H/SystemLibrary/LaunchDaemons/com.gone.reader.daemon.plist"
+
 # A JPEG with no file extension in a hidden folder, for the deep scan.
 printf '\xff\xd8\xff\xe0' > "$H/.hidden/img"
 head -c 4000 /dev/zero >> "$H/.hidden/img"
+
+# VS Code: two recently opened folders, a terminal history of three commands
+# and one folder, with the copy it keeps beside them, and saved state for a
+# project that exists and one that's gone.
+V="$AS/Code/User"
+mkdir -p "$V/globalStorage" "$V/workspaceStorage/aaa" "$V/workspaceStorage/bbb"
+sqlite3 "$V/globalStorage/state.vscdb" "
+create table ItemTable (key text unique on conflict replace, value blob);
+insert into ItemTable values ('history.recentlyOpenedPathsList', '{\"entries\":[{\"folderUri\":\"file:///Users/x/one\"},{\"folderUri\":\"file:///Users/x/two\"}]}'),
+  ('terminal.history.entries.commands', '{\"entries\":[{\"key\":\"ls\",\"value\":{}},{\"key\":\"git push\",\"value\":{}},{\"key\":\"ssh server.example\",\"value\":{}}]}'),
+  ('terminal.history.timestamp.commands', '1760000000000'),
+  ('terminal.history.entries.dirs', '{\"entries\":[{\"key\":\"/Users/x/one\",\"value\":{}}]}'),
+  ('workbench.colorTheme', 'Dark');"
+cp "$V/globalStorage/state.vscdb" "$V/globalStorage/state.vscdb.backup"
+printf '{"folder": "file://%s"}' "$H/Documents" > "$V/workspaceStorage/aaa/workspace.json"
+printf '{"folder": "file://%s"}' "$H/Old%20Project" > "$V/workspaceStorage/bbb/workspace.json"
+head -c 2000 /dev/zero > "$V/workspaceStorage/bbb/state.vscdb"
+
+# PyCharm's recent projects: two.
+mkdir -p "$AS/JetBrains/PyCharm2024.1/options"
+printf '<application>\n<component name="RecentProjectsManager">\n<RecentProjectMetaInfo opened="false"/>\n<RecentProjectMetaInfo opened="false"/>\n</component>\n</application>\n' \
+  > "$AS/JetBrains/PyCharm2024.1/options/recentProjects.xml"
+
+# macOS's notification history: three notifications from two apps.
+N="$L/Group Containers/group.com.apple.usernoted/db2"
+mkdir -p "$N"
+sqlite3 "$N/db" "
+create table app (app_id integer primary key, identifier varchar);
+create table record (rec_id integer primary key, app_id integer, uuid blob, data blob, request_date real, request_last_date real, delivered_date real, presented bool, style integer, snooze_fire_date real);
+insert into app values (1, 'com.apple.mobilesms'), (2, 'com.apple.mail');
+insert into record (app_id, delivered_date) values (1, 780000000), (1, 781000000), (2, 782000000);"
